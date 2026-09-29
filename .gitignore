@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 运行时状态（含你自己的抓取记录，绝不提交）
+.weread-crawl.json
+.gzh-index.json
+manifest.json
+ratelimit.json
+config.json
+
+# 抓取产物
+articles/
+images/
+out/
+
+# 系统
+.DS_Store
