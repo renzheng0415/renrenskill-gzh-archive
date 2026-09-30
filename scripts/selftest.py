@@ -84,7 +84,7 @@ def test_unit() -> None:
     section("2. 单元测试（期限边界 / 解析 / 转换 / 路径 / 公开索引）")
     total = 0
     all_ok = True
-    for name in ("test_core.py", "test_sogou.py", "test_weread_period.py"):
+    for name in ("test_core.py", "test_sogou.py", "test_weread_period.py", "test_ratelimit.py"):
         proc = subprocess.run(
             [sys.executable, str(ROOT / "tests" / name)],
             capture_output=True, text=True, cwd=ROOT,

@@ -185,7 +185,9 @@ def fetch_page(book_id: str, offset: int, timeout: int = 60,
 
         d = acquire(kind="list", label=f"{book_id}@{offset}")
         if not d.allowed:
-            raise CrawlError(f"被限流器拦下：{d.reason}")
+            # 用专门的异常类型，让主循环能和「网络/接口错误」分开处理 ——
+            # 限流是「等会儿再来就行」，不需要用户排查什么。
+            raise RateLimited(d.reason)
 
     try:
         proc = subprocess.run(
@@ -532,6 +534,11 @@ def crawl(book_id: str, account: str, kb_root: str, config: dict | None = None,
                 continue
             except LoginExpired as exc:
                 result["stopped_reason"] = f"登录失效：{exc}"
+                state.save(state_path)
+                return _finish(result, state, kb_root, cfg)
+            except RateLimited as exc:
+                # 限流器拦下 —— 不是故障，是额度问题。如实说明，并保留进度。
+                result["stopped_reason"] = f"额度限制：{exc}"
                 state.save(state_path)
                 return _finish(result, state, kb_root, cfg)
             except CrawlError as exc:

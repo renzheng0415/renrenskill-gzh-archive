@@ -101,13 +101,22 @@ def check(ledger: Path | None = None, min_interval: float = SAFE_MIN_INTERVAL,
     now = time.time()
     events = _load(ledger)
 
-    # ① 风控后的强制静默：最后一条是 error 事件
+    # ① 风控后的强制静默：最近一条是 error 事件
+    #
+    # ⚠️ 这里也必须是 allowed=False。理由和下面的小时/日上限相同：
+    #    静默期长达 15 分钟，如果只是「等一下」，acquire() 会闷头睡过去，
+    #    用户看到的就是「程序卡死了」。
+    #    正确做法：明确拒绝 + 告知还要等多久，由调用方决定是等还是收工。
     for e in reversed(events):
         if e.get("kind") == "error":
             elapsed = now - float(e["t"])
             if elapsed < COOLDOWN_AFTER_ERROR:
-                return Decision(COOLDOWN_AFTER_ERROR - elapsed,
-                                f"上次命中风控，强制静默中", True)
+                left = COOLDOWN_AFTER_ERROR - elapsed
+                return Decision(
+                    left,
+                    f"上次命中风控，强制静默中，还需 {left / 60:.0f} 分钟",
+                    False,
+                )
             break
         if e.get("kind") == "list":
             break
@@ -120,15 +129,31 @@ def check(ledger: Path | None = None, min_interval: float = SAFE_MIN_INTERVAL,
             return Decision(min_interval - elapsed, f"距上次请求仅 {elapsed:.0f} 秒", True)
 
     # ③ 每小时 / 每天上限
+    #
+    # ⚠️ 这两条必须是 allowed=False，不能只是「等一会儿」。
+    #    踩过的坑：早期小时上限返回 allowed=True + wait=3160 秒，
+    #    于是 acquire() 会真的闷头等 53 分钟 —— 用户看到的就是「卡住不动」。
+    #    正确语义：**这一轮到此为止**，告诉用户什么时候重置，让他自己决定。
+    #    （只有短间隔那种 wait 才是「等一下就好」，所以只有那种 allowed=True。）
     hour = [e for e in events if e.get("kind") == "list" and now - float(e["t"]) < 3600]
     if len(hour) >= per_hour:
         oldest = min(float(e["t"]) for e in hour)
-        return Decision(max(0.0, 3600 - (now - oldest)), f"本小时已发 {len(hour)} 个请求", True)
+        wait = max(0.0, 3600 - (now - oldest))
+        return Decision(
+            wait,
+            f"本小时已发 {len(hour)} 个请求（上限 {per_hour}），约 {wait / 60:.0f} 分钟后重置",
+            False,
+        )
 
     day = [e for e in events if e.get("kind") == "list" and now - float(e["t"]) < 86400]
     if len(day) >= per_day:
         oldest = min(float(e["t"]) for e in day)
-        return Decision(max(0.0, 86400 - (now - oldest)), f"24 小时内已发 {len(day)} 个请求", False)
+        wait = max(0.0, 86400 - (now - oldest))
+        return Decision(
+            wait,
+            f"24 小时内已发 {len(day)} 个请求（上限 {per_day}），约 {wait / 3600:.1f} 小时后重置",
+            False,
+        )
 
     return Decision(0.0, "", True)
 

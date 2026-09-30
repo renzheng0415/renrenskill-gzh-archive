@@ -677,7 +677,15 @@ def cmd_backfill(args: argparse.Namespace) -> int:
 
 
 def cmd_pace(args: argparse.Namespace) -> int:
-    """用大白话报告当前抓取节奏。"""
+    """用大白话报告剩余额度与当前节奏。
+
+    ## 为什么是「余量」而不是「已用」
+
+    早期版本显示「发了 16 个请求（上限 200）」—— 用户真正想知道的是
+    **「我还能抓多少」**，而不是「我抓了多少」。已用数要自己减，等于没答。
+
+    所以现在直接把「还能发几个」放在最前面。
+    """
     from .ratelimit import COOLDOWN_AFTER_ERROR, SAFE_MIN_INTERVAL, SAFE_PER_DAY, SAFE_PER_HOUR
     from .ratelimit import check as rl_check
     from .ratelimit import stats as rl_stats
@@ -685,37 +693,52 @@ def cmd_pace(args: argparse.Namespace) -> int:
     s = rl_stats()
     d = rl_check()
 
-    print("━" * 62)
-    print("  抓取节奏")
-    print("━" * 62)
-    print(f"  最近 1 小时   发了 {s['last_hour']} 个请求（上限 {SAFE_PER_HOUR}）")
-    print(f"  最近 24 小时  发了 {s['last_day']} 个请求（上限 {SAFE_PER_DAY}）")
+    left_day = max(0, SAFE_PER_DAY - s["last_day"])
+    left_hour = max(0, SAFE_PER_HOUR - s["last_hour"])
 
-    if s["seconds_since_last"] is None:
-        print("  上次请求      还没有记录")
-    else:
-        print(f"  上次请求      {s['seconds_since_last']:.0f} 秒前")
-
-    print(f"  24h 内风控    {s['errors_24h']} 次")
+    print("━" * 62)
+    print("  抓取余量")
+    print("━" * 62)
+    print()
+    print(f"  今天还能发      {left_day:>3} 个请求   （已用 {s['last_day']}/{SAFE_PER_DAY}）")
+    print(f"  这个小时还能发  {left_hour:>3} 个请求   （已用 {s['last_hour']}/{SAFE_PER_HOUR}）")
     print()
 
+    # 现在能不能发 —— 这是用户最关心的一句
     if not d.allowed:
-        warn(f"已达上限：{d.reason}")
-        print("  建议：明天再跑，或调大 --per-day")
+        # 三种「不能发」的原因不同，给的下一步也应该不同 ——
+        # 统一说「明天再跑」会误导：风控静默只要等十几分钟。
+        warn(f"现在不能发：{d.reason}")
+        if "风控" in d.reason:
+            print("     这是临时静默，等够时间就能继续，不用做别的")
+        elif "个小时" in d.reason or "24 小时" in d.reason:
+            print("     等额度重置即可；或调大 --per-day / --per-hour")
+        else:
+            print("     稍后再试")
     elif d.wait > 0:
-        warn(f"现在发请求会被拦下，需要等 {d.wait:.0f} 秒")
-        print(f"  原因：{d.reason}")
+        secs = d.wait
+        if secs >= 60:
+            warn(f"现在还不能发，约 {secs / 60:.0f} 分钟后可以")
+        else:
+            warn(f"现在还不能发，等 {secs:.0f} 秒")
+        print(f"     原因：{d.reason}")
     else:
-        ok("现在可以发请求")
+        ok("现在可以抓")
 
     print()
-    print("  安全节奏（默认值，刻意保守）：")
-    print(f"    · 任何两个请求间隔 ≥ {SAFE_MIN_INTERVAL:.0f} 秒")
-    print(f"    · 每小时 ≤ {SAFE_PER_HOUR} 个请求")
-    print(f"    · 每 24 小时 ≤ {SAFE_PER_DAY} 个请求")
-    print(f"    · 命中风控后强制静默 {COOLDOWN_AFTER_ERROR // 60} 分钟")
+    print(f"  距上次请求      {s['seconds_since_last']:.0f} 秒前"
+          if s["seconds_since_last"] is not None else "  距上次请求      还没发过请求")
+    print(f"  24 小时内被风控  {s['errors_24h']} 次")
     print()
-    print("  这些限制对所有调用都生效，包括临时测试 —— 绕不过去。")
+    print("  ── 限速规则（写在磁盘上，跨脚本生效）──")
+    print(f"     两次请求间隔   ≥ {SAFE_MIN_INTERVAL:.0f} 秒")
+    print(f"     每小时上限     {SAFE_PER_HOUR} 个")
+    print(f"     每 24 小时上限 {SAFE_PER_DAY} 个")
+    print(f"     命中风控后     强制停 {COOLDOWN_AFTER_ERROR // 60} 分钟")
+    print()
+    print("  ⚠️ 别去用 weread-mp-fetcher 自带的 --quota 看余量 ——")
+    print("     本工具抓列表走的是自己的通道，不经过它，")
+    print("     所以它那边永远显示 0。以这里为准。")
     print("━" * 62)
     return 0
 
