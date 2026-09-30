@@ -145,22 +145,57 @@ def probe() -> str:
 def resolve_from_url(url: str) -> tuple[str, str]:
     """从一篇文章链接解析出 (bookId, 公众号名)。
 
-    bookId 靠 `__biz` 换算（本地算，不联网）：
-        bookId = MP_WXS_ + base64解码(__biz)
-    公众号名靠抓一次文章页拿（顺带确认这篇能打开）。
+    支持两种链接形态：
+
+    · **长链**（带 `__biz=...`）—— 直接从 URL 里取，不用联网就能算出 bookId
+    · **短链**（`https://mp.weixin.qq.com/s/xxxxxxxx`）—— 必须抓一次页面，
+      从 HTML 里取 `var biz = "..."`
+
+    ⚠️ 踩过的坑：早期版本只认长链，用户给微信里复制的短链会直接报
+    「这个链接里没有 __biz」。而**微信里长按复制出来的恰恰几乎都是短链**，
+    所以这条路径必须支持短链，否则最常见的用法第一步就卡住。
 
     这条路径**不需要先把号加进书架** —— 实测确认过。
     """
     import base64
     import re as _re
 
+    UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+    html = ""
+    biz = ""
+
     m = _re.search(r"__biz=([A-Za-z0-9+/=%]+)", url)
-    if not m:
-        raise WereadError(
-            "这个链接里没有 __biz，认不出是哪个公众号。\n"
-            "请给完整文章链接（形如 https://mp.weixin.qq.com/s/xxx 或带 __biz 的长链）。"
-        )
-    biz = m.group(1)
+    if m:
+        biz = m.group(1)
+
+    # 短链（或任何 URL 里没带 __biz 的情况）→ 抓页面拿
+    if not biz:
+        if not _re.match(r"^https?://", url):
+            raise WereadError(
+                f"认不出来：{url}\n"
+                "请给公众号文章的完整链接（https://mp.weixin.qq.com/s/...）。"
+            )
+        try:
+            import requests
+            resp = requests.get(url, headers={"User-Agent": UA}, timeout=25)
+            html = resp.text or ""
+        except Exception as exc:  # noqa: BLE001
+            raise WereadError(f"抓取文章页失败：{exc}") from exc
+
+        # 页面里取 __biz：优先 JS 变量，退回 URL 形式
+        bm = (_re.search(r'var\s+biz\s*=\s*["\']([A-Za-z0-9+/=]+)["\']', html)
+              or _re.search(r'__biz=([A-Za-z0-9+/=%]+)', html))
+        if not bm:
+            if "参数错误" in html or "已被发布者删除" in html:
+                raise WereadError("这篇文章打不开（参数错误或已被删除），换一篇该号的文章试试")
+            raise WereadError(
+                "抓到的页面里找不到公众号标识（__biz）。\n"
+                "  确认这是一篇公众号文章（mp.weixin.qq.com），且能正常打开。"
+            )
+        biz = bm.group(1)
+
     try:
         decoded = base64.b64decode(biz + "=" * (-len(biz) % 4)).decode("utf-8")
     except Exception as exc:  # noqa: BLE001
@@ -170,16 +205,13 @@ def resolve_from_url(url: str) -> tuple[str, str]:
 
     book_id = f"MP_WXS_{decoded}"
 
-    # 抓一次文章页拿公众号名；失败也不影响 bookId
+    # 公众号名：长链情况下这里才需要抓页面；短链已经抓过了
     name = ""
     try:
-        import requests
-
-        resp = requests.get(url, headers={
-            "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
-        }, timeout=25)
-        html = resp.text
+        if not html:
+            import requests
+            resp = requests.get(url, headers={"User-Agent": UA}, timeout=25)
+            html = resp.text or ""
         nm = (_re.search(r'nickname\s*=\s*htmlDecode\(\s*["\']([^"\']+)', html)
               or _re.search(r'id=["\']js_name["\'][^>]*>\s*([^<]+?)\s*<', html))
         if nm:
@@ -336,23 +368,144 @@ def fetch_articles(pages: int = 3, timeout: int = 600) -> dict[str, list[WereadA
     return result
 
 
+def read_tool_accounts() -> list[dict]:
+    """读 weread-mp-fetcher 的 config.json，拿到「要抓哪些号」。
+
+    返回 [{"name": ..., "bookId": ...}, ...]
+    """
+    path = TOOL_DIR / "config.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    out = []
+    for a in data.get("accounts") or []:
+        if isinstance(a, dict) and a.get("bookId"):
+            out.append({"name": a.get("name") or a["bookId"], "bookId": a["bookId"]})
+    return out
+
+
+def fetch_until(book_id: str, name: str, period, max_pages: int = 20,
+                verbose: bool = True) -> tuple[list["WereadArticle"], dict]:
+    """按 offset 一直往前翻，**直到覆盖住期限边界**。
+
+    ## 为什么不能用「抓 N 页再筛」
+
+    早期实现是「用固定页数抓一批，再在结果里按期限过滤」。
+    问题：如果号每月发 10 篇，而只抓了 3 页（约 60 篇），
+    那实际只有半年数据 —— 用户说要「1 年」，拿到的却是半年，
+    **而且不报错**。筛选只能收窄已抓到的范围，没法把没抓的补出来。
+
+    正确做法：按时间边界决定要翻多少页 —— 翻到「最早一篇早于期限起点」为止。
+
+    返回 (articles, meta)。meta 里带：
+        covered      是否真的覆盖到了期限起点
+        pages        实际翻了几页
+        oldest_ts    抓到的最早时间
+        reason       停止原因
+    """
+    from .crawl import CrawlError, RateLimited, fetch_page
+
+    cutoff = period.cutoff_ts()
+    log = (lambda m: print(m, flush=True)) if verbose else (lambda m: None)
+
+    articles: list["WereadArticle"] = []
+    seen_urls: set[str] = set()
+    offset = 0
+    pages = 0
+    oldest = 0
+    reason = ""
+
+    for i in range(max_pages):
+        try:
+            page = fetch_page(book_id, offset)
+        except RateLimited as exc:
+            reason = f"触发风控：{exc}"
+            break
+        except CrawlError as exc:
+            reason = f"取页失败：{exc}"
+            break
+
+        items = page.get("items") or []
+        reviews = int(page.get("reviews") or 0)
+
+        # 空页 = 到头了。这一页没内容，不计入「翻了几页」——
+        # 否则报「翻了 11 页」而实际有数据的只有 10 页，读者会以为多抓了一页。
+        if reviews == 0:
+            reason = "已翻到该号最早一篇"
+            break
+
+        for it in items:
+            url = it.get("url") or ""
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                articles.append(WereadArticle(
+                    title=it.get("title") or "", url=url,
+                    ts=int(it.get("t") or 0), account=name))
+
+        pages += 1
+        page_oldest = int(page.get("oldest") or 0)
+        if page_oldest:
+            oldest = page_oldest if not oldest else min(oldest, page_oldest)
+
+        if verbose:
+            when = time.strftime("%Y-%m-%d", time.localtime(page_oldest)) if page_oldest else "—"
+            log(f"    [{pages}] offset={offset} → {len(items)} 篇，最早 {when}")
+
+        # 停止条件：已经覆盖到期限起点
+        if cutoff is not None and page_oldest and page_oldest <= cutoff:
+            reason = "已覆盖到期限起点"
+            break
+
+        offset += reviews
+    else:
+        reason = f"达到本次页数上限（{max_pages} 页）"
+
+    covered = (
+        period.days is None
+        and reason == "已翻到该号最早一篇"
+    ) or (
+        cutoff is not None and oldest and oldest <= cutoff
+    )
+
+    return articles, {
+        "covered": covered,
+        "pages": pages,
+        "oldest_ts": oldest,
+        "reason": reason,
+    }
+
+
 def export_from_weread(period: str, kb_root: str, pages: int = 3,
                        concurrency: int = 2, limit: int | None = None,
-                       no_images: bool = False, sleep: float = 2.0) -> dict:
+                       no_images: bool = False, sleep: float = 2.0,
+                       book_id: str | None = None, account: str | None = None,
+                       verbose: bool = True) -> dict:
     """端到端：微信读书列表 → 期限筛选 → 抓正文 → 写知识库。
+
+    `pages` 是**页数上限**（防止无限翻），不是「固定抓这么多页」。
+    实际翻几页由期限决定：翻到覆盖住期限起点就停。
 
     返回一份结果摘要（可直接 json 序列化）。
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     per = parse_period(period)
-    by_account = fetch_articles(pages=pages)
 
-    if not by_account:
+    # ---- 确定要抓哪些号
+    if book_id:
+        targets = [{"name": account or book_id, "bookId": book_id}]
+    else:
+        targets = read_tool_accounts()
+
+    if not targets:
         return {
             "ok": False,
-            "error": "微信读书没有返回任何文章。",
-            "hint": "先在 config.json 里配置 accounts，或跑 --shelf 看有哪些号。",
+            "error": "没有指定要抓的公众号。",
+            "hint": ("用 --from-url / --from-name / --book-id 指定一个号；"
+                     "或把号填进 ~/.weread-mp-fetcher/tool/config.json 的 accounts"),
         }
 
     summary = {
@@ -364,7 +517,18 @@ def export_from_weread(period: str, kb_root: str, pages: int = 3,
         "total_failed": 0,
     }
 
-    for name, articles in by_account.items():
+    for tgt in targets:
+        name = tgt["name"]
+        print(f"→ 【{name}】{per.label}：翻页直到覆盖期限起点（最多 {pages} 页）")
+        articles, meta = fetch_until(tgt["bookId"], name, per,
+                                     max_pages=pages, verbose=verbose)
+
+        if not meta["covered"]:
+            hint = (f"只抓到 {time.strftime('%Y-%m-%d', time.localtime(meta['oldest_ts']))}"
+                    if meta["oldest_ts"] else "一篇都没抓到")
+            print(f"  ⚠️ 未覆盖到期限起点（{hint}，停了：{meta['reason']}）"
+                  f"\n     想要更早的，把 --pages 调大（当前 {pages}）")
+
         shaped = [a.to_backend_shape() for a in articles]
         selected = filter_by_period(shaped, per)
         if limit:
@@ -412,6 +576,8 @@ def export_from_weread(period: str, kb_root: str, pages: int = 3,
         write_manifest(kb, all_arts, per.label, extra={
             "source": "weread",
             "in_period": len(selected),
+            "list_pages": meta["pages"],
+            "list_covered": meta["covered"],
             "failed": failed,
         })
 
@@ -426,6 +592,8 @@ def export_from_weread(period: str, kb_root: str, pages: int = 3,
             "index_path": str(index_path),
             "failed_items": failed[:10],
             "titles": [a.title for a in exported[:50]],
+            "list_pages": meta["pages"],
+            "list_covered": meta["covered"],
         })
         summary["total_exported"] += len(exported)
         summary["total_failed"] += len(failed)

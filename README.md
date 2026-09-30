@@ -15,6 +15,8 @@
 
 或者就是单纯的：这个号写得好，我想把它攒起来。
 
+也可以不抓全部 —— 只要最近 1 个月、3 个月、半年或 1 年的，都行。
+
 ## 为什么现在得专门做个工具
 
 2026 年 7 月 30 日，微信把「公众号后台查别人文章列表」这个接口关了。
@@ -42,7 +44,9 @@ bash ~/.weread-mp-fetcher/start-chrome.sh
 
 ### 然后抓
 
-最省事的是给一篇文章链接：
+两种抓法，看你要什么。
+
+**要全部**，从今天一路翻到这个号发过的第一篇：
 
 ```bash
 bash scripts/gzh.sh crawl --from-url "https://mp.weixin.qq.com/s/xxxxx"
@@ -54,10 +58,34 @@ bash scripts/gzh.sh crawl --from-url "https://mp.weixin.qq.com/s/xxxxx"
 bash scripts/gzh.sh crawl --from-name "某某研究院"
 ```
 
-它会自己一页页往前翻，一直翻到这个号最早那篇。
+**只要最近一段**，用 `weread` 加个期限：
+
+```bash
+bash scripts/gzh.sh weread --from-name "某某研究院" --period 1m   # 最近 1 个月
+bash scripts/gzh.sh weread --from-name "某某研究院" --period 3m   # 最近 3 个月
+bash scripts/gzh.sh weread --from-name "某某研究院" --period 6m   # 最近半年
+bash scripts/gzh.sh weread --from-name "某某研究院" --period 1y   # 最近 1 年
+```
+
+期限五个：`1m` `3m` `6m` `1y` `all`（不写就是 all）。
+
+它不会傻抓固定几页 —— 而是**一直往前翻，翻到覆盖住这个期限起点为止**。
+要 3 个月就翻到 3 个月前停下，不多翻；要 1 年就翻满 1 年。
+
+万一本号文章太多、翻到页数上限还没到期限起点，它会**明确告诉你没抓够**，
+而不是少给几个月还装作没事：
+
+```bash
+# 想翻得更深就加大页数上限（默认 20 页）
+bash scripts/gzh.sh weread --from-name "某某研究院" --period 1y --pages 40
+```
+
+> **两种抓法的区别**：`crawl` 为「全量」设计 —— 能断点续跑、能补漏；
+> `weread` 为「取一段」设计 —— 翻到期限就停，更省时间。
+> 两个都支持 `--from-url` / `--from-name` / `--book-id` 三种定位方式。
 
 **不用守着。** 断了、关了、电脑睡了都无所谓，
-再跑一次同样的命令，它从上次停的地方接着走。
+再跑一次同样的命令，它从上次停的地方接着走（`crawl` 支持续跑）。
 
 ### 最后补一下
 
@@ -206,8 +234,9 @@ AI 会自己看说明书、检查环境、跑抓取、最后验收。
 ```bash
 GZH="bash scripts/gzh.sh"
 
-$GZH crawl --from-name "某某号"    # 抓全部，能续跑
-$GZH backfill --account "某某号"   # 补漏
+$GZH crawl --from-name "某某号"        # 抓全部，能续跑
+$GZH weread --from-name "某某号" --period 3m   # 只抓最近 3 个月
+$GZH backfill --account "某某号"       # 补漏
 $GZH pace                          # 看现在能不能抓
 $GZH article "<文章链接>"           # 只抓一篇
 $GZH urls links.txt                # 抓一批链接

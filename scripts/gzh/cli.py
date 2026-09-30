@@ -474,7 +474,21 @@ def cmd_weread(args: argparse.Namespace) -> int:
     info("提示：微信读书一页 ≈ 20 次群发 ≈ 70-80 篇文章")
     print()
 
+    # ⚠️ WereadError 要在这里 import，让整个函数作用域可见。
+    #    早期把它 import 在分支里，外层 except 引用时抛 UnboundLocalError，
+    #    把真正的错误信息（比如「链接里没有 __biz」）整个吞掉了。
+    from .weread import WereadError, resolve_from_name, resolve_from_url
+
     try:
+        bid, acc = None, None
+        if getattr(args, "from_url", None):
+            bid, acc = resolve_from_url(args.from_url)
+        elif getattr(args, "from_name", None):
+            bid, acc, _cands = resolve_from_name(
+                args.from_name, cfg.auth_key, api_base=cfg.api_base)
+        elif getattr(args, "book_id", None):
+            bid, acc = args.book_id, args.account
+
         summary = export_from_weread(
             period=period.key,
             kb_root=kb_root,
@@ -483,6 +497,8 @@ def cmd_weread(args: argparse.Namespace) -> int:
             limit=args.limit,
             no_images=args.no_images,
             sleep=args.sleep,
+            book_id=bid,
+            account=acc,
         )
     except WereadError as exc:
         err(str(exc))
@@ -878,9 +894,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_urls.set_defaults(func=cmd_urls)
 
     p_wr = sub.add_parser("weread", help="通过微信读书抓历史文章（唯一能翻深的路径）")
-    p_wr.add_argument("--period", default="all", help="期限：1m/3m/6m/1y/all（默认 all）")
-    p_wr.add_argument("--pages", type=int, default=3,
-                      help="每个号翻几页（默认 3，一页≈70-80 篇；上限见 config.json）")
+    p_wr.add_argument("--period", default="all",
+                      help="期限：1m/3m/6m/1y/all（默认 all）。"
+                           "工具会一直翻到覆盖住这个期限起点为止")
+    p_wr.add_argument("--from-url", help="给该号一篇文章链接（推荐，不需要 key）")
+    p_wr.add_argument("--from-name", help="给公众号名字（需要 auth-key）")
+    p_wr.add_argument("--book-id", help="已知 bookId 时直接给")
+    p_wr.add_argument("--account", help="公众号名（存知识库用）")
+    p_wr.add_argument("--pages", type=int, default=20,
+                      help="翻页上限（默认 20）。实际翻几页由 --period 决定："
+                           "抓够期限起点就停")
     p_wr.add_argument("--kb", help="知识库根目录")
     p_wr.add_argument("--limit", type=int, help="每个号最多导出多少篇")
     p_wr.add_argument("--concurrency", type=int, default=2, help="并发抓正文数（默认 2）")
