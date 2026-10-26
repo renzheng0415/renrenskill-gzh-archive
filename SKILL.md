@@ -1,362 +1,122 @@
 ---
 name: renrenskill-gzh-archive
-description: 把微信公众号某个博主的历史文章全量归档成本地 Markdown 知识库（含图片、frontmatter、索引）。2026 年微信封禁后台列表接口后唯一可用的全量路径是微信读书 + 专用 Chrome。支持按期限筛选、断点续跑、三通道正文抓取（含 JS 渲染页）。用户提到 renrenskill、抓公众号、导出公众号文章、公众号归档、备份某个号、把某博主的文章存进知识库、公众号转 Markdown、批量下载公众号历史文章时使用。WeChat official-account full-history archiver to local Markdown knowledge base.
-version: 1.0.0
+description: 把微信公众号历史文章归档为本地 Markdown 知识库，保存原文链接、本地图片和索引。支持微信读书列表、新版 WR1 正文标识、图文相册、断点续跑、持续运行、状态查询及完整性验收。用户要求抓公众号、导出历史文章、备份公众号或建立公众号资料库时使用。
+version: 1.1.0
 ---
 
 # 公众号文章归档（renrenskill）
 
-把任意微信公众号的历史文章**全量**抓下来，转成本地 Markdown 知识库。
+目标是尽可能完整保存目标公众号在数据源中可访问的文章。接口变化、账号收录范围、登录、验证码、作者权限和风控都可能限制结果。不能承诺固定耗时、零风控或一定追溯到开号第一篇。
 
-**实测能力**：单号 502 篇 / 4.2 年 / 51 个月零缺口 / 图片 2704 张，约 20 分钟跑完，0 次风控。
+## 路径和输入
 
-## 路径解析（先读这条）
-
-本文档里的 `{baseDir}` 指**本 SKILL.md 所在目录**。
-
-**执行任何命令前先把它换成绝对路径：**
+`{baseDir}` 为本 SKILL.md 所在目录，调用时展开为真实绝对路径。所有业务命令走：
 
 ```bash
-BASE_DIR="$(cd "$(dirname "$(find ~/.agents/skills ~/.claude/skills ~/.qwen/skills -name SKILL.md -path '*renrenskill-gzh-archive*' 2>/dev/null | head -1)")" && pwd)"
-echo "$BASE_DIR"
+bash "{baseDir}/scripts/gzh.sh" --help
 ```
 
-之后统一用 `$BASE_DIR`：
+用户给了知识库路径就使用该路径，否则读取 `~/.config/gzh/config.json` 的 `kb_root`。相对路径按当前工作目录解析，执行时转换成绝对路径。确实没有路径时才询问。
 
-```bash
-bash "$BASE_DIR/scripts/gzh.sh" --help
-```
-
-`scripts/gzh.sh` 是**唯一入口** —— 它自己定位代码、自动补 `requests` 依赖。
-所以不用管 `PYTHONPATH`，也不用管当前在哪个目录。
-
----
-
-## 先讲清楚：2026 年之后这件事为什么变难了
-
-**微信在 2026-07-30 掐掉了「公众号后台跨账号文章列表」接口**（`ret=200013 freq control`）。
-
-后果：**网上绝大多数公众号导出工具同时失效** —— 它们全都依赖那一个接口
-（wechat-article-exporter、wechat-download-api、多数 RSS 服务…）。
-
-**「换个工具」解决不了，必须换数据源。**
-
-本 Skill 走的是**微信读书**这条独立管线（微信读书把公众号当「书」管理，与公众号后台无关）。
-这条路在 200013 之后**实测仍然可用**，是已知唯一能翻到开号第一篇的路径。
-
-> 详细调研过程见 `references/platform-change.md`。
-
----
-
-## 开工三步
-
-1. **确认前置条件**（缺一不可，见下节「前置检查」）
-2. **拿到目标公众号的一篇文章链接** → 自动解析 `bookId`
-3. **跑全量抓取** → 断点续跑，跑完为止
-
----
+目标优先用一篇该号文章链接定位。名称搜索需要有效的导出服务认证，认证失败时查找公开文章链接或请用户提供；不要把名称搜索认证失效当成微信读书登录失效。同名账号不能自行猜选。
 
 ## 前置检查
 
-**必须先做这一步，否则抓不了。**
+先确认本机时间、Chrome 调试端口和阅读器状态：
 
 ```bash
-# ① 专用 Chrome 是否在跑
+date
 curl -s -m 3 http://127.0.0.1:9333/json/version
-
-# ② 微信读书抓取工具是否装了
-ls -d ~/.weread-mp-fetcher/tool
-
-# ③ 浏览器渲染通道是否可用（端到端，最可靠）
-bash {baseDir}/scripts/gzh.sh article "https://mp.weixin.qq.com/s/hNtnQsJ_T7GIdBQ5-LUoMQ" --no-images
+bash "{baseDir}/scripts/gzh.sh" weread --probe
+bash "{baseDir}/scripts/gzh.sh" pace
 ```
 
-**任一项不满足时怎么办：**
+缺少环境时读 [安装说明](references/setup.md)。Chrome 必须使用独立数据目录；登录或验证码需要用户手动完成。看到验证码节点不等于它仍可见，不能只凭节点存在或 `document.cookie` 推断状态。
 
-| 缺什么 | 处理 |
-|---|---|
-| 专用 Chrome 没开 | 让用户跑 `bash ~/.weread-mp-fetcher/start-chrome.sh`，然后**扫码登录微信读书**（一次性） |
-| 工具没装 | 见 `references/setup.md` 的安装步骤 |
-| Chrome 开了但没登录 | `--shelf` 会报 `-2010 用户不存在` → 让用户在 Chrome 窗口里重新扫码 |
+登录失效、验证码、页面上下文异常和风控分开报告。`-2041` 既可能来自页面校验，也可能来自风控；持续失败时使用现有阅读器状态诊断，不反复新开标签或请求其他号试探。见 [排错](references/troubleshooting.md)。
 
-**⚠️ 抓取全程那个 Chrome 要开着** —— 微信正在把文章页改成 JS 动态渲染，
-被改过的页面只有浏览器渲染通道能抓到正文。
+## 主流程
 
----
-
-## 主流程：全量归档一个号
-
-**三种定位目标号的方式**（按推荐度排序）：
+1. 核对目标号和保存路径。
+2. 抓一篇实际目标文章验证正文、原文链接、元数据和图片。
+3. 全量请求使用持续运行入口；它每批保存断点，等待额度恢复，单篇失败保留记录并继续。
+4. 启动后确认进程存在且有真实进度，不把“已启动”说成“已完成”。
+5. 列表到底后补抓差集，再检查验收结果。
 
 ```bash
-# ① 给一篇文章链接（最推荐：不依赖任何 key）
-bash {baseDir}/scripts/gzh.sh crawl \
+bash "{baseDir}/scripts/gzh.sh" crawl \
   --from-url "https://mp.weixin.qq.com/s/xxxxx" \
-  --interval 25 --kb "<知识库根目录>"
-
-# ② 给公众号名字（走 searchbiz，需要 auth-key —— 但该接口至今仍可用）
-bash {baseDir}/scripts/gzh.sh crawl \
-  --from-name "某某研究院" \
-  --interval 25 --kb "<知识库根目录>"
-
-# ③ 已知 bookId 时直接给
-bash {baseDir}/scripts/gzh.sh crawl \
-  --book-id MP_WXS_3079276420 --account "公众号名" \
-  --interval 25 --kb "<知识库根目录>"
+  --account "公众号名" --interval 25 --continuous --kb "绝对知识库路径"
 ```
 
-> **为什么 ② 还能用**：微信封的是「列历史文章」接口（200013），
-> **不是「搜公众号」接口**。`searchbiz` 返回的 `fakeid` 就是 `__biz`，
-> 直接换算出 `bookId`（`MP_WXS_` + base64解码）。实测：
-> 例：某公众号 → `fakeid=MjM0NTY3ODkwMQ==` → `MP_WXS_2345678901`，与文章链接的换算结果一致。
->
-> 同名号会有多个（实测搜一个名字常能搜到若干个近似号），
-> 工具会列出候选并优先选**精确同名**的那个。
-
-**跑不完不用管，再跑一次同样的命令** —— 会从断点接着跑。
-
-**跑完后必须补一步**（否则可能静默缺文章）：
+后台运行时保存日志并保留 PID。例如：
 
 ```bash
-bash {baseDir}/scripts/gzh.sh backfill --account "<公众号名>" --kb "<知识库根目录>"
+nohup bash "{baseDir}/scripts/gzh.sh" crawl \
+  --book-id MP_WXS_1234567890 --account "公众号名" \
+  --continuous --kb "绝对知识库路径" > "绝对日志路径" 2>&1 < /dev/null &
 ```
 
-> **为什么必须 backfill**：断点文件记的是「URL 在列表里出现过」，
-> 知识库文件是「正文已成功抓下」—— 两件事不一样。
-> 中断过的号会留下差集，而续跑从更晚的 offset 开始，**那批永远不会被回头扫到**。
-> 实测踩到过一次：丢了 18 篇。
+必须保持 Chrome 打开、电脑不休眠。进程不跨系统重启自动恢复；退出后重跑相同命令接续。`crawl` 不加 `--continuous` 时仍是有限页数批次，不能称为无人值守持续任务。不要同时启动两个写入同一账号目录的任务。
 
----
-
-## 命令速查
-
-所有命令统一走包装器（自动定位代码、自动补依赖）：
+持续模式保存 `.gzh-status.json`、`.gzh-heartbeat` 和进程锁。普通异常采用逐步延长的等待，登录失效停止等待人工处理；分页重复或停滞列为待检查，不能据此声称已经到底。
 
 ```bash
-GZH="bash {baseDir}/scripts/gzh.sh"
-
-# 全量归档（主力）
-$GZH crawl --from-url "<文章链接>" --interval 25 --kb "<知识库>"
-
-# 补齐列表与知识库的差集（每次 crawl 后跑）
-$GZH backfill --account "<公众号名>" --kb "<知识库>"
-
-# 从磁盘 Markdown 重建索引（中断/异常后用）
-$GZH rebuild --kb "<知识库>" --account "<公众号名>"
-
-# 快速抓最近 N 页（不想等全量时）
-$GZH weread --period 6m --pages 3 --kb "<知识库>"
-
-# 抓单篇
-$GZH article "<文章链接>" --kb "<知识库>"
-
-# 批量抓一批链接
-$GZH urls links.txt --kb "<知识库>"
-
-# 看微信读书书架里有哪些号
-$GZH weread --shelf
-
-# 检查专用 Chrome 与页面状态（不消耗额度）
-$GZH weread --probe
+bash "{baseDir}/scripts/gzh.sh" status --account "公众号名" --kb "知识库路径"
+bash "{baseDir}/scripts/gzh.sh" audit --account "公众号名" --kb "知识库路径"
+bash "{baseDir}/scripts/gzh.sh" backfill --account "公众号名" --kb "知识库路径"
 ```
 
----
+## 内容与限频
 
-## 限频：已经做成了硬闸门，绕不过去
+- 普通公开文章优先直接读取；需要时使用原有服务或浏览器兜底。
+- 微信读书新版 `WR1…` 标识不是微信短链接。列表保留 reviewId，通过 `/web/mp/content` 获取 HTML，再读取真实原文链接。
+- 图文相册提取配文与原始图片，不把水印缩略图当原图。视频无可提取正文时记录未支持或失败，不生成成功占位文章。
+- 列表和微信读书正文请求共享账本，默认间隔至少 25 秒，每小时最多 40 次，每 24 小时最多 200 次。正文改走微信读书会消耗额度，不能沿用旧的整号耗时估计。
+- 风控错误记账并进入冷却；额度耗尽不是新一次风控。不可绕过账本或调快测试。
 
-微信读书**有风控**。这不是「注意一下」的事，是**实测撞过两次**的事。
-所以限流不再是文档里的纪律，而是**写在磁盘上的账本** —— 谁发请求都得先过它。
+## 完成与进度口径
 
-### 安全节奏（默认值，刻意保守）
+始终区分：已发现文章、已成功保存的列表文章、目录总文章（可能含额外单篇）、待补抓、列表是否已到底、图片是否完整。
 
-| 限制 | 值 | 来历 |
-|---|---|---|
-| 两个请求间隔 | **≥ 25 秒** | 25 秒间距连续翻 25 页 → 0 风控（成功抓完 501 篇） |
-| 每小时 | ≤ 40 个请求 | 比理论值更保守 |
-| 每 24 小时 | ≤ 200 个请求 | 比理论值更保守 |
-| 命中风控后 | **强制静默 15 分钟** | 防「失败立刻重试」把封禁拖长 |
+只有空页和更远 offset 都确认无群发，才标记列表结束。断点在慢速下载之前写入，避免中断丢失当前页。失败文章与真实原文链接映射必须跨进程保留。
 
-### 为什么必须做成跨进程的
+`status` / `audit` 输出：
 
-**两次风控都不是翻页造成的，是翻页循环之外的临时调用造成的：**
+- `list_finished`：是否确认历史列表末尾；
+- `total_known`：当前是否能确定数据源列表总数；未到底只能报告已发现数量；
+- `archived_from_list`、`files`、`unresolved`：列表成功数、目录文件数及差集；
+- `missing_images`、`remote_images`：缺失图片和未本地化图片；
+- `complete`：列表结束且正文、图片均通过检查。
 
-| 事故 | 节奏 | 结果 |
-|---|---|---|
-| ① 手写脚本探深度 | 7 个请求 / 18 秒 | `-2041`，约 25 分钟恢复 |
-| ② 连续测多个号可用性 | 无间隔 | 全站 `-2012`，约 20 分钟恢复 |
+只有 `complete=true` 才能报告该数据源范围内归档完整。`finished` 或退出码单独不能证明全部正文成功。检查月份分布可辅助发现缺口，但某月无文章不等于采集遗漏。
 
-这两次都是**独立进程**发起的 —— 进程内的计时器管不着它们。
-所以账本写在 `~/.config/gzh/ratelimit.json`，**跨脚本共享**。
+用户问“还在抓吗”时，现场检查进程、心跳、最近成功和下次重试时间，明确回答正在下载、限流等待、需要登录、失败或完成。总数未知时不要估造总数；速度只在正常抓取区间估算，等待和故障另计。
 
-### 闸门钉在哪
+## 交付目录
 
-钉在 `fetch_page()` —— **唯一的取页出口**。
-不管谁调用（正式抓取、临时测试、将来新写的脚本），都先过闸。
-
-实测验证（故意模拟事故 ①）：
-
-```
-offset=  0  耗时   0.6s
-             ⏳ 距上次请求仅 1 秒，等 24 秒…
-offset= 19  耗时  25.4s
-             ⏳ 距上次请求仅 1 秒，等 24 秒…
-offset= 39  耗时  26.8s
-总耗时 53 秒（若无限流则是 2 秒）
+```text
+公众号名/
+├── articles/             Markdown 与原文来源
+├── images/               本地图片
+├── index.md              阅读索引
+├── .gzh-index.json       结构化索引
+├── .weread-crawl.json    列表断点、原文映射
+├── .gzh-status.json      运行状态及下次动作
+├── manifest.json         文件清单与失败记录
+└── audit.json            持续模式结束后的验收
 ```
 
-**限流器自动插了等待，节奏被压回安全区间。**
-
-### 看剩余额度
+## 其他命令
 
 ```bash
-bash {baseDir}/scripts/gzh.sh pace
+bash "{baseDir}/scripts/gzh.sh" article "文章链接" --kb "知识库路径"
+bash "{baseDir}/scripts/gzh.sh" urls links.txt --kb "知识库路径"
+bash "{baseDir}/scripts/gzh.sh" rebuild --account "公众号名" --kb "知识库路径"
+bash "{baseDir}/scripts/gzh.sh" weread --shelf
+bash "{baseDir}/scripts/gzh.sh" weread --from-url "文章链接" --period 6m --pages 20
+python3 "{baseDir}/scripts/selftest.py"
+python3 -m unittest discover -s "{baseDir}/scripts/tests" -q
 ```
 
-**直接输出「今天还能发几个」「现在能不能发」**，不用自己减。
-
-报告包含：日/小时剩余额度、上次请求距今多久、24h 内被风控几次、当前是否可发。
-
-> ⚠️ **不要用 `weread-mp-fetcher` 自带的 `node bin/weread.mjs --quota` 查余量。**
-> 本工具的列表抓取走自己的通道（`tools/weread_page.mjs`），不经过那个工具，
-> 所以它的账本永远是 0，会误导。**以 `gzh pace` 为准。**
-
-### 三条铁律
-
-1. **不要绕过闸门**。包括「我就测一下」—— 两次事故都是这么来的。
-2. **风控是临时的**（15-30 分钟自愈），但**失败后别立刻重试**，限流器会自动拦。
-3. **出错就停手**。工具作者原话：
-   > 「写在文档里的纪律约束不住人，也约束不住 AI。」
-   > —— 他防的就是我们干的事。
-
----
-
-## 什么时候算「抓完了」
-
-工具用三个信号判停（任一成立即停）：
-
-1. 接口返回 `reviews: 0`（该 offset 之后没有群发了）
-2. 返回的「最早时间」不再前移
-3. 连续两页拿到的 URL 全都在已见集合里
-
-**输出 `✅ 已翻到尽头` 才是真抓完。**
-
-⚠️ 判据是启发式的，**验收时建议独立复核一次**：手动取一个更大的 offset
-（比如当前末尾 offset + 20），确认确实返回 0 群发。
-
----
-
-## 交付物形态
-
-```
-<知识库根>/<公众号名>/
-├── articles/          每篇一个 .md（文件名：YYYY-MM-DD-标题.md）
-├── images/            本地化图片（文件名：内容哈希）
-├── index.md           文章索引表（日期/标题/作者/图片数/原创）
-├── .gzh-index.json    结构化索引（程序读写）
-├── manifest.json      本次运行清单（含失败明细）
-└── .weread-crawl.json 断点状态（续跑用）
-```
-
-**Markdown 的 frontmatter**：
-
-```yaml
----
-title: "文章标题"
-account: "公众号名"
-author: "作者署名"
-publish_date: "2026-01-15"
-source_url: "https://mp.weixin.qq.com/s/..."
-source: 微信公众号
-original: true
-tags: [公众号, 公众号文章, 公众号名, 原创]
----
-```
-
-图片引用是 `../images/xxx.png`（相对 Markdown 文件所在目录），**在 Obsidian 里可直接显示**。
-
----
-
-## 验收标准
-
-抓完必须逐项核对（缺一项都不算完成）：
-
-```bash
-KB="<知识库根>/<公众号名>"
-
-# 1. 四者数量一致
-ls "$KB/articles" | wc -l                              # 文件数
-python3 -c "import json;print(json.load(open('$KB/.gzh-index.json'))['count'])"
-python3 -c "import json;print(json.load(open('$KB/manifest.json'))['count'])"
-grep -c '^| 20' "$KB/index.md"                         # 索引表行数、四者必须相同
-
-# 2. 月度分布无缺口
-ls "$KB/articles" | cut -c1-7 | sort | uniq -c
-
-# 3. 抽查首尾两篇的 frontmatter 和图片能否显示
-```
-
-**失败要如实报告**，常见两种（都是永久性的，不是 bug）：
-
-| 现象 | 含义 |
-|---|---|
-| 「根据作者隐私设置，无法查看该内容」 | 作者自己设了限制 |
-| 视频帖无正文 | 只有视频没有文字 |
-
----
-
-## 三条正文抓取通道
-
-微信正在把文章页改成 **JS 动态渲染**（静态 HTML 里只有壳）。所以自动逐级兜底：
-
-| 通道 | 说明 |
-|---|---|
-| `direct` | 直接请求 mp.weixin.qq.com（快） |
-| `api` | 公共导出服务兜底 |
-| `browser` | 用专用 Chrome 渲染（慢，但能救回 JS 渲染页） |
-
-**判据**：静态 HTML 里找不到真正的 `id="js_content"` 元素（只在 JS 源码里出现），
-就是动态渲染页 → 必须走 `browser`。
-
-**因此抓取时 Chrome 必须开着**，否则这批文章会失败。
-
----
-
-## 用户偏好与追问
-
-**默认行为**（不要每次都问）：
-
-- 知识库根目录：从 `~/.config/gzh/config.json` 的 `kb_root` 读；用户给了就用用户的
-- 限频：用默认的保守值，**不要擅自调快**
-- 图片：默认下载（保持图文完整）
-
-**必须问的两种情况**：
-
-1. **知识库存哪里没定** → 问清楚路径，别猜
-2. **目标号有多个同名** → 让用户给一篇文章链接确认
-
-**不要问的**：期限（全量抓取不需要期限）、要不要图片（默认要）、并发数（用默认）。
-
----
-
-## 参考资料
-
-按需读取，别一次全加载：
-
-| 文件 | 什么时候读 |
-|---|---|
-| `references/setup.md` | 首次安装、环境报错时 |
-| `references/troubleshooting.md` | 抓取失败、风控、报错码时 |
-| `references/platform-change.md` | 用户问「为什么网上工具都不能用了」时 |
-| `references/alternatives.md` | 用户问「还有没有别的办法」时 |
-
----
-
-## 快速自检
-
-环境是否就绪，一条命令：
-
-```bash
-python3 {baseDir}/scripts/selftest.py
-```
-
-期望输出 `✅ 通过 34   ❌ 失败 0`。
+按需读取 [安装](references/setup.md)、[排错](references/troubleshooting.md)、[历史平台变化记录](references/platform-change.md)、[其他路径](references/alternatives.md)。历史实测数据不等于当前服务保证。

@@ -477,7 +477,7 @@ def cmd_weread(args: argparse.Namespace) -> int:
     # ⚠️ WereadError 要在这里 import，让整个函数作用域可见。
     #    早期把它 import 在分支里，外层 except 引用时抛 UnboundLocalError，
     #    把真正的错误信息（比如「链接里没有 __biz」）整个吞掉了。
-    from .weread import WereadError, resolve_from_name, resolve_from_url
+    from .weread import resolve_from_name, resolve_from_url
 
     try:
         bid, acc = None, None
@@ -607,6 +607,13 @@ def cmd_crawl(args: argparse.Namespace) -> int:
     print("  提示       可随时 Ctrl-C；下次运行会从断点继续")
     print("━" * 66)
 
+    if getattr(args, "continuous", False):
+        if args.reset:
+            err("持续运行不接受 --reset；请先备份并单次重置")
+            return 2
+        from .runtime import run
+        return run(book_id, account, kb_root, conf)
+
     try:
         result = crawl(book_id, account, kb_root, config=conf, reset=args.reset)
     except CrawlError as exc:
@@ -636,7 +643,7 @@ def cmd_crawl(args: argparse.Namespace) -> int:
         info(f"  已抓时间范围 {result['oldest']} ~ {result.get('newest', '?')}")
     print()
     if result["finished"]:
-        ok(f"✅ 已翻到尽头 —— 该号全量抓取完成（共 {result['total_seen']} 篇）")
+        ok(f"已确认列表末尾（已发现 {result['total_seen']} 篇）；请运行 backfill 和 audit 核对正文及图片")
     else:
         warn(f"⏸  未抓完 —— {result['stopped_reason']}")
         info("   再跑一次本命令即可继续（会自动从断点续跑）")
@@ -943,13 +950,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_cw.add_argument("--account", help="公众号名（存知识库用；--from-url 时会自动识别）")
     p_cw.add_argument("--kb", help="知识库根目录")
     p_cw.add_argument("--pages", type=int, help="本次运行最多翻几页")
-    p_cw.add_argument("--interval", type=float, help="每页之间的间隔秒数（默认 20）")
+    p_cw.add_argument("--interval", type=float, help="请求最小间隔秒数（默认 25）")
     p_cw.add_argument("--per-day", type=int, help="每天最多发几个列表请求（默认 30）")
     p_cw.add_argument("--concurrency", type=int, default=2, help="并发抓正文数（默认 2）")
     p_cw.add_argument("--sleep", type=float, default=1.5, help="每篇正文之间的间隔秒数")
     p_cw.add_argument("--no-images", action="store_true", help="不下载图片")
     p_cw.add_argument("--reset", action="store_true", help="丢弃断点，从头开始（慎用）")
+    p_cw.add_argument("--continuous", action="store_true", help="持续运行，等待额度恢复，保存运行状态")
     p_cw.set_defaults(func=cmd_crawl)
+
+    def archive_report(args):
+        from .runtime import inspect_archive
+        cfg = Config.load(args.config)
+        report = inspect_archive(args.kb or cfg.kb_root, args.account)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+
+    for command in ("status", "audit"):
+        p_report = sub.add_parser(command, help="查看运行状态与完整性（只读）")
+        p_report.add_argument("--account", required=True)
+        p_report.add_argument("--kb")
+        p_report.set_defaults(func=archive_report)
 
     p_bf = sub.add_parser("backfill", help="补齐「列表见过但正文没落盘」的文章")
     p_bf.add_argument("--account", required=True, help="公众号名（知识库子目录名）")

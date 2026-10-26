@@ -474,6 +474,9 @@ def fetch_article(url: str, timeout: int = 30, prefer: str = "direct",
 
     prefer="api" 时前两条顺序相反。浏览器渲染始终最后（慢，但能救回 JS 渲染页）。
     """
+    if url.startswith("weread:"):
+        from .reader_content import fetch_reader_content
+        return fetch_reader_content(url[len("weread:"):])
     # 链接不完整是最常见的失败原因，且微信的报错页毫无提示，所以先自查。
     if problem := diagnose_url(url):
         raise FetchError(problem)

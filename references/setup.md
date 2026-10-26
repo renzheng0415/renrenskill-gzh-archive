@@ -10,7 +10,7 @@
 |---|---|---|
 | Python 3.9+ | 主程序 | ✅ |
 | `requests` | HTTP 请求 | ✅（包装器会自动装） |
-| Node.js 18+ | 浏览器渲染通道 | ✅ |
+| Node.js 22+ | 浏览器渲染通道 | ✅ |
 | Google Chrome | 专用实例，微信读书 + JS 渲染页 | ✅ |
 | 微信读书账号 | 文章列表数据源 | ✅ |
 
@@ -28,7 +28,7 @@ cd ~/.weread-mp-fetcher
 git clone --depth 1 https://github.com/Pengyf04/weread-mp-fetcher.git tool
 ```
 
-零第三方依赖，不用 `npm install`。
+Node 脚本使用内置 fetch 和 WebSocket，需要 Node.js 22+，不用 `npm install`。
 
 **然后写配置** `~/.weread-mp-fetcher/tool/config.json`：
 
@@ -74,7 +74,7 @@ bash ~/.weread-mp-fetcher/start-chrome.sh
 - 只监听 `127.0.0.1`，外部访问不到
 - 登录态存在专用目录里，Chrome 完全退出后仍保持登录
 
-**然后在弹出的窗口里扫码登录微信读书。这是全程唯一需要人工的一步。**
+**在弹出的窗口里扫码登录微信读书。遇到验证码或登录过期时仍需人工处理。**
 
 ---
 

@@ -121,13 +121,7 @@ def check(ledger: Path | None = None, min_interval: float = SAFE_MIN_INTERVAL,
         if e.get("kind") == "list":
             break
 
-    # ② 最短间隔
-    last = next((float(e["t"]) for e in reversed(events) if e.get("kind") == "list"), None)
-    if last is not None:
-        elapsed = now - last
-        if elapsed < min_interval:
-            return Decision(min_interval - elapsed, f"距上次请求仅 {elapsed:.0f} 秒", True)
-
+    # Check hard quotas before the short interval so max_wait=0 cannot hide exhaustion.
     # ③ 每小时 / 每天上限
     #
     # ⚠️ 这两条必须是 allowed=False，不能只是「等一会儿」。
@@ -155,10 +149,15 @@ def check(ledger: Path | None = None, min_interval: float = SAFE_MIN_INTERVAL,
             False,
         )
 
+    last = next((float(e["t"]) for e in reversed(events) if e.get("kind") == "list"), None)
+    if last is not None:
+        elapsed = now - last
+        if elapsed < min_interval:
+            return Decision(min_interval - elapsed, f"距上次请求仅 {elapsed:.0f} 秒", True)
     return Decision(0.0, "", True)
 
 
-def acquire(kind: str = "list", label: str = "", ledger: Path | None = None,
+def _acquire(kind: str = "list", label: str = "", ledger: Path | None = None,
             min_interval: float = SAFE_MIN_INTERVAL, per_hour: int = SAFE_PER_HOUR,
             per_day: int = SAFE_PER_DAY, max_wait: float | None = None,
             verbose: bool = True) -> Decision:
@@ -197,9 +196,13 @@ def acquire(kind: str = "list", label: str = "", ledger: Path | None = None,
 def note_error(label: str = "", ledger: Path | None = None) -> None:
     """记一次风控事件 —— 之后的请求会被强制静默一段时间。"""
     ledger = Path(ledger).expanduser() if ledger else DEFAULT_LEDGER
-    events = _load(ledger)
-    events.append({"t": time.time(), "kind": "error", "label": label})
-    _save(ledger, events)
+    import fcntl
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with open(ledger.with_suffix(".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        events = _load(ledger)
+        events.append({"t": time.time(), "kind": "error", "label": label})
+        _save(ledger, events)
 
 
 def stats(ledger: Path | None = None) -> dict:
@@ -220,3 +223,14 @@ def stats(ledger: Path | None = None) -> dict:
         "limits": {"min_interval": SAFE_MIN_INTERVAL, "per_hour": SAFE_PER_HOUR,
                    "per_day": SAFE_PER_DAY},
     }
+
+
+def acquire(*args, **kwargs):
+    """Serialize wait/check/charge across processes using a ledger-specific lock."""
+    import fcntl
+    ledger = kwargs.get("ledger") or (args[2] if len(args) > 2 else DEFAULT_LEDGER)
+    path = Path(ledger).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_suffix(".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _acquire(*args, **kwargs)

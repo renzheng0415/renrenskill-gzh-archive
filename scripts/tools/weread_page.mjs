@@ -90,7 +90,10 @@ const expr = `(function(){
         out.push({
           t: r.createTime || grp.createTime || 0,
           title: mi.title,
-          url: mi.originalId ? ('https://mp.weixin.qq.com/s/' + mi.originalId.replace(/~/g,'_')) : '',
+          // WR1 IDs are opaque reader IDs, not public WeChat short links.
+          url: mi.originalId ? (mi.originalId.startsWith('WR1')
+            ? ('weread:' + r.reviewId)
+            : ('https://mp.weixin.qq.com/s/' + mi.originalId.replace(/~/g,'_'))) : '',
           rid: r.reviewId || ''
         });
       });

@@ -84,7 +84,7 @@ def test_unit() -> None:
     section("2. 单元测试（期限边界 / 解析 / 转换 / 路径 / 公开索引）")
     total = 0
     all_ok = True
-    for name in ("test_core.py", "test_sogou.py", "test_weread_period.py", "test_ratelimit.py"):
+    for name in ("test_core.py", "test_sogou.py", "test_weread_period.py", "test_ratelimit.py", "test_reliability.py"):
         proc = subprocess.run(
             [sys.executable, str(ROOT / "tests" / name)],
             capture_output=True, text=True, cwd=ROOT,
@@ -222,7 +222,7 @@ def test_plugin() -> None:
 # ---------------------------------------------------------------- 6. auth-key
 
 def test_authkey() -> None:
-    section("6. 历史文章列表（需要 auth-key）")
+    section("6. 可选名称搜索服务认证（微信读书归档不依赖）")
     from gzh.config import Config
     from gzh.fetcher import verify_auth_key
 
@@ -232,8 +232,8 @@ def test_authkey() -> None:
         return
 
     valid = verify_auth_key(cfg.auth_key, api_base=cfg.api_base)
-    record("auth-key 有效", valid,
-           "可以抓历史列表" if valid else "已失效（4 天有效期），需重新扫码")
+    record("可选 auth-key", True if valid else None,
+           "名称搜索可用" if valid else "认证不可用；使用 --from-url，不影响微信读书路径")
 
     if valid:
         from gzh.fetcher import FetchError, FreqControlError, list_articles, search_account
@@ -318,12 +318,7 @@ def main() -> int:
         return 1
 
     if skipped:
-        print("\n下一步（打通最后一条路径）：")
-        print("  1. 打开 https://down.mptext.top ，用微信扫码登录（选你自己的公众号/服务号）")
-        print("  2. 在「API」页面复制 auth-key")
-        print(f'  3. python3 -m gzh config --set-auth-key "<key>"')
-        print(f'  4. python3 -m gzh account "<博主名>" --period 3m --list-only')
-        print("\n  再跑一次本自检，第 6 项会从「跳过」变成「通过」。")
+        print("\n可选项目已跳过。微信读书归档可用 --from-url，不要求补齐名称搜索认证。")
 
     return 0
 

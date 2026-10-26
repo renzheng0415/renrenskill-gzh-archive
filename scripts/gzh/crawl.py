@@ -61,7 +61,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 DEFAULT_CONFIG = {
     # 每个请求之间等多久（秒）。原作者一天 30+ 请求就触发过反爬，
     # 这里取「宁可慢」的取向：默认 20 秒。
-    "request_interval_sec": 20,
+    "request_interval_sec": 25,
     # 每天最多发多少个「列表」请求。默认 30 —— 低于作者的 40，
     # 因为他是「选定的保守值」，我们比他再保守一档。
     "requests_per_day": 30,
@@ -153,6 +153,10 @@ class RateLimited(CrawlError):
     """命中风控（-2041）。"""
 
 
+class QuotaLimited(CrawlError):
+    """Local quota or cooldown; distinct from a new remote rejection."""
+
+
 class LoginExpired(CrawlError):
     """登录失效（-2010）。"""
 
@@ -163,7 +167,7 @@ TOOL_PAGE = Path(__file__).resolve().parent.parent / "tools" / "weread_page.mjs"
 
 
 def fetch_page(book_id: str, offset: int, timeout: int = 60,
-               respect_ratelimit: bool = True) -> dict:
+               respect_ratelimit: bool = True, min_interval: float = 25) -> dict:
     """取某一页。返回 {items, reviews, oldest, ...}。
 
     ## 所有取页请求都必须经过这里
@@ -183,11 +187,11 @@ def fetch_page(book_id: str, offset: int, timeout: int = 60,
     if respect_ratelimit:
         from .ratelimit import acquire, note_error
 
-        d = acquire(kind="list", label=f"{book_id}@{offset}")
+        d = acquire(kind="list", label=f"{book_id}@{offset}", min_interval=max(25, min_interval))
         if not d.allowed:
             # 用专门的异常类型，让主循环能和「网络/接口错误」分开处理 ——
             # 限流是「等会儿再来就行」，不需要用户排查什么。
-            raise RateLimited(d.reason)
+            raise QuotaLimited(d.reason)
 
     try:
         proc = subprocess.run(
@@ -264,7 +268,7 @@ def export_new_items(state: CrawlState, kb_root: str, items: list[dict],
 
     # 是否抓正文，只由「知识库索引里有没有」决定
     existing = kb.load_index()
-    todo = [it for it in items if it.get("url") and it["url"] not in existing]
+    todo = [it for it in items if it.get("url") and it.get("resolved_url", it["url"]) not in existing]
 
     ok_count = 0
     failures: list[dict] = []
@@ -283,6 +287,7 @@ def export_new_items(state: CrawlState, kb_root: str, items: list[dict],
                 download_image_files=not no_images,
             )
             art.channel = f"weread+{res.channel}"
+            it["resolved_url"] = res.meta.url
             return art
 
         with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
@@ -351,7 +356,7 @@ def backfill_missing(account: str, kb_root: str, concurrency: int = 2,
         raise CrawlError(f"找不到断点文件：{kb.dir / '.weread-crawl.json'}")
 
     existing = kb.load_index()
-    missing = [v for k, v in state.seen.items() if k not in existing]
+    missing = [v for k, v in state.seen.items() if v.get("resolved_url", k) not in existing]
     missing.sort(key=lambda x: x.get("t", 0), reverse=True)
     if limit:
         missing = missing[:limit]
@@ -385,6 +390,7 @@ def backfill_missing(account: str, kb_root: str, concurrency: int = 2,
         art = kb.export_article(res.meta, res.content_html, res.images,
                                 download_image_files=not no_images)
         art.channel = f"weread-backfill+{res.channel}"
+        it["resolved_url"] = res.meta.url
         return art
 
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
@@ -413,6 +419,7 @@ def backfill_missing(account: str, kb_root: str, concurrency: int = 2,
             "failures": failures[:50],
         })
 
+    state.save(kb.dir / ".weread-crawl.json")
     result["exported"] = ok_count
     result["failed"] = len(failures)
     result["failures"] = failures
@@ -500,17 +507,8 @@ def crawl(book_id: str, account: str, kb_root: str, config: dict | None = None,
         # 若各等一遍，同一份等待会被算两次，白白变慢。
         # 做法：算出「还要等多久才够 max(interval, 全局最小间隔)」，只睡这个差额。
         # 这样睡完再进 fetch_page 时，限流器会发现已经不欠了，不会再等。
-        if page_i > 0 or state.pages_done > 0:
-            from .ratelimit import SAFE_MIN_INTERVAL, check as rl_check
-
-            target = max(interval, SAFE_MIN_INTERVAL)
-            d = rl_check()
-            # d.wait = 距上次请求还差多久才满全局最小间隔
-            # 我们想距上次满 target 秒，所以还需等 target - (SAFE_MIN_INTERVAL - d.wait)
-            remaining = max(0.0, target - (SAFE_MIN_INTERVAL - d.wait)) if d.wait > 0 else target
-            if remaining > 0:
-                log(f"  等待 {remaining:.0f} 秒…")
-                time.sleep(remaining)
+        # The transport acquires the shared gate once. Hard quota/cooldown
+        # decisions return to the runner instead of sleeping inside this batch.
 
         offset = state.next_offset
         log(f"  [{page_i + 1}/{per_run}] offset={offset} …", )
@@ -519,7 +517,7 @@ def crawl(book_id: str, account: str, kb_root: str, config: dict | None = None,
         while True:
             try:
                 state.charge(1, today)
-                page = fetch_page(book_id, offset)
+                page = fetch_page(book_id, offset, min_interval=interval)
                 break
             except RateLimited as exc:
                 cooldowns += 1
@@ -536,7 +534,7 @@ def crawl(book_id: str, account: str, kb_root: str, config: dict | None = None,
                 result["stopped_reason"] = f"登录失效：{exc}"
                 state.save(state_path)
                 return _finish(result, state, kb_root, cfg)
-            except RateLimited as exc:
+            except QuotaLimited as exc:
                 # 限流器拦下 —— 不是故障，是额度问题。如实说明，并保留进度。
                 result["stopped_reason"] = f"额度限制：{exc}"
                 state.save(state_path)
@@ -555,12 +553,18 @@ def crawl(book_id: str, account: str, kb_root: str, config: dict | None = None,
 
         # ---- 终止判据 1：该 offset 之后没有群发了
         if reviews == 0:
-            if cfg.get("confirm_tail") and not state.finished:
-                # 再往前探一页确认（防止微信读书分页偶发返回空）
-                log("           返回 0 群发 —— 再探一页确认是否真的到底")
-                state.finished = True
-                state.save(state_path)
-                continue
+            if cfg.get("confirm_tail"):
+                log("           返回空页，检查更远 offset")
+                try:
+                    tail = fetch_page(book_id, offset + 20)
+                except CrawlError as exc:
+                    result["stopped_reason"] = f"末尾未确认：{exc}"
+                    state.save(state_path)
+                    return _finish(result, state, kb_root, cfg)
+                if int(tail.get("reviews") or 0):
+                    result["stopped_reason"] = "空页后仍有文章，需检查分页，不能判定完成"
+                    state.save(state_path)
+                    return _finish(result, state, kb_root, cfg)
             state.finished = True
             result["stopped_reason"] = "翻到尽头（reviews=0）"
             break
@@ -568,8 +572,7 @@ def crawl(book_id: str, account: str, kb_root: str, config: dict | None = None,
         # ---- 终止判据 2：oldest 不再变小（原地打转）
         if prev_oldest and oldest and oldest >= prev_oldest:
             log("           最早时间没有继续变小 —— 可能已到底，停止")
-            state.finished = True
-            result["stopped_reason"] = "翻到尽头（最早时间不再前移）"
+            result["stopped_reason"] = "分页停滞（最早时间不再前移），未确认尽头"
             break
 
         # ---- 进度
@@ -585,6 +588,11 @@ def crawl(book_id: str, account: str, kb_root: str, config: dict | None = None,
 
         # ---- 导出这一页的新文章
         before = len(state.seen)
+        for it in items:
+            if it.get("url"):
+                state.seen.setdefault(it["url"], it)
+        # Persist discovery before potentially slow article/image downloads.
+        state.save(state_path)
         ok_n, fail_n, fails = export_new_items(
             state, kb_root, items,
             concurrency=int(cfg.get("concurrency", 2)),
@@ -602,8 +610,7 @@ def crawl(book_id: str, account: str, kb_root: str, config: dict | None = None,
         if newly == 0:
             consecutive_empty += 1
             if consecutive_empty >= 2:
-                state.finished = True
-                result["stopped_reason"] = "翻到尽头（连续两页无新文章）"
+                result["stopped_reason"] = "分页重复，未确认尽头"
                 break
         else:
             consecutive_empty = 0
