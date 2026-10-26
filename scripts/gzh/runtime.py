@@ -101,7 +101,7 @@ def run(book_id, account, root, config=None):
                     wait_until(directory, time.time() + delay, '异常：' + str(exc)[:200])
                     continue
                 reason = result['stopped_reason']
-                if '登录失效' in reason:
+                if reason.startswith('登录失效：'):
                     write_status(directory, status='needs_login', reason=reason)
                     return 2
                 if result['finished']:

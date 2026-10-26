@@ -7,7 +7,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gzh.content import parse_content
 from gzh.crawl import CrawlState, crawl, CrawlError, QuotaLimited
-from gzh.runtime import inspect_archive
+from gzh.runtime import inspect_archive, run
 from gzh.exporter import KnowledgeBase
 
 HEAD = '<meta property="og:url" content="https://mp.weixin.qq.com/s?__biz=MTIz&amp;mid=1&amp;idx=1&amp;sn=abc"><meta property="og:title" content="测试">'
@@ -56,6 +56,17 @@ class ReliabilityTests(unittest.TestCase):
                 result=crawl('MP_WXS_123','demo',root,verbose=False)
             sleep.assert_not_called()
             self.assertIn('额度',result['stopped_reason'])
+
+    def test_rate_message_mentioning_login_is_not_login_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            responses=[dict(stopped_reason='连续命中风控：这不代表登录失效',finished=False),
+                       dict(stopped_reason='分页重复，未确认尽头',finished=False)]
+            with patch('gzh.runtime.crawl',side_effect=responses),patch('gzh.runtime.wait_until') as wait:
+                result=run('MP_WXS_123','demo',root)
+            self.assertEqual(result,1)
+            wait.assert_called_once()
+            status=json.loads((Path(root)/'demo'/'.gzh-status.json').read_text())
+            self.assertEqual(status['status'],'needs_review')
 
     def test_finished_list_with_missing_article_is_incomplete(self):
         with tempfile.TemporaryDirectory() as root:
