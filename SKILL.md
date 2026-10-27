@@ -1,11 +1,11 @@
 ---
 name: renrenskill-gzh-archive
-display_name: 公众号文章归档
-display_name_en: WeChat Official Account Archiver
+display_name: renrenskill公众号归档
+display_name_en: renrenskill WeChat Account Archiver
 description: 把微信公众号历史文章归档为本地 Markdown 知识库，保存原文链接、本地图片和索引。支持微信读书列表、新版 WR1 正文标识、图文相册、断点续跑、持续运行、状态查询及完整性验收。用户要求抓公众号、导出历史文章、备份公众号或建立公众号资料库时使用。
 description_zh: 把微信公众号历史文章归档为本地 Markdown 知识库，保存原文链接、本地图片和索引。支持微信读书列表、图文相册、断点续跑和完整性验收。
 description_en: Archive WeChat Official Account articles into a local Markdown knowledge base with source links, images, and an index. Supports WeChat Reading lists, image albums, resumable crawls, and completeness checks.
-version: 1.1.1
+version: 1.1.2
 ---
 
 # 公众号文章归档（renrenskill）
