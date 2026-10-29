@@ -1,13 +1,13 @@
 # 微信公众号文章归档
 
-`renrenskill-gzh-archive` 把微信公众号可访问的历史文章保存为 Markdown、本地图片和阅读索引，适合放入 Obsidian。
+`zenskill-gzh-archive` 把微信公众号可访问的历史文章保存为 Markdown、本地图片和阅读索引，适合放入 Obsidian。
 
-支持普通文章、图文相册、微信读书新版 WR1 文章标识、断点续跑、持续运行、状态查询和完整性检查。Skill 名称保持不变。
+支持普通文章、图文相册、微信读书新版 WR1 文章标识、断点续跑、持续运行、状态查询和完整性检查。
 
 ## 安装与环境
 
 ```bash
-npx -y skills add renzheng0415/renrenskill-gzh-archive -g --all
+npx -y skills add renzheng0415/zenskill-gzh-archive -g --all
 ```
 
 也可将仓库检出到 Agent 的 skills 目录。需要 Python 3.9+、requests、Node.js 22+（内置 fetch/WebSocket）、Google Chrome，持续模式目前适用于支持 `fcntl` 的 macOS/Linux。
